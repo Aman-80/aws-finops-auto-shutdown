@@ -36,3 +36,4 @@ lambdas/**/*.zip
 .env
 .env.local
 secrets.json
+terraform/build/
