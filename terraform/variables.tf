@@ -9,3 +9,9 @@ variable "instance_type" {
   type        = string
   default     = "t3.micro"
 }
+
+variable "slack_webhook_url" {
+  description = "Slack incoming webhook URL"
+  type        = string
+  sensitive   = true
+}

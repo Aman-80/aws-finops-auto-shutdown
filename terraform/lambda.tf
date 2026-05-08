@@ -18,11 +18,13 @@ resource "aws_lambda_function" "scheduler" {
 
   environment {
     variables = {
-      DRY_RUN        = "false"
-      OVERRIDE_TABLE = aws_dynamodb_table.overrides.name
+      DRY_RUN             = "false"
+      OVERRIDE_TABLE      = aws_dynamodb_table.overrides.name
+      SLACK_WEBHOOK_PARAM = aws_ssm_parameter.slack_webhook.name
     }
   }
 }
+
 resource "aws_cloudwatch_log_group" "scheduler" {
   name              = "/aws/lambda/${aws_lambda_function.scheduler.function_name}"
   retention_in_days = 7

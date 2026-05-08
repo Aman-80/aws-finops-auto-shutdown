@@ -1,23 +1,66 @@
 """
-Lambda scheduler — with override mechanism (M5)
-Stops/starts EC2 instances tagged AutoShutdown=true,
-respects developer overrides stored in DynamoDB.
+Lambda scheduler — full M6
+Stops/starts EC2 instances + Slack notifications + override mechanism.
 """
 import boto3
+import json
 import logging
 import os
 import time
+import urllib.request
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 ec2 = boto3.client('ec2')
 dynamodb = boto3.client('dynamodb')
+ssm = boto3.client('ssm')
 
 SHUTDOWN_TAG_KEY = 'AutoShutdown'
 SHUTDOWN_TAG_VALUE = 'true'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 OVERRIDE_TABLE = os.environ.get('OVERRIDE_TABLE', 'finops-shutdown-overrides')
+SLACK_WEBHOOK_PARAM = os.environ.get('SLACK_WEBHOOK_PARAM', '/finops/slack/webhook-url')
+
+HOURLY_COST_USD = 0.0104
+USD_TO_INR = 84
+WEEKDAY_OFF_HOURS = 15
+
+_webhook_url = None
+
+
+def get_slack_webhook():
+    global _webhook_url
+    if _webhook_url is None:
+        response = ssm.get_parameter(Name=SLACK_WEBHOOK_PARAM, WithDecryption=True)
+        _webhook_url = response['Parameter']['Value']
+    return _webhook_url
+
+def send_slack_notification(action, affected, skipped, instances_affected, instances_skipped):
+    try:
+        emoji = '🛑' if action == 'stop' else '🟢'
+        savings_inr = affected * HOURLY_COST_USD * WEEKDAY_OFF_HOURS * USD_TO_INR
+
+        lines = [f"{emoji} *FinOps Scheduler* — action: `{action}`"]
+        lines.append(f"• Affected: *{affected}* instance(s)")
+        if instances_affected:
+            lines.append(f"   `{', '.join(instances_affected)}`")
+        if skipped:
+            lines.append(f"• Skipped (overrides): *{skipped}*")
+            lines.append(f"   `{', '.join(instances_skipped)}`")
+        if action == 'stop' and affected > 0:
+            lines.append(f"• Est. savings tonight: *₹{savings_inr:.0f}*")
+
+        payload = json.dumps({'text': '\n'.join(lines)}).encode('utf-8')
+        req = urllib.request.Request(
+            get_slack_webhook(),
+            data=payload,
+            headers={'Content-Type': 'application/json'}
+        )
+        urllib.request.urlopen(req, timeout=5)
+        logger.info("Slack notification sent")
+    except Exception as e:
+        logger.warning(f"Slack notification failed: {e}")
 
 
 def find_managed_instances(state):
@@ -38,7 +81,6 @@ def find_managed_instances(state):
 
 
 def has_active_override(instance_id):
-    """Check DynamoDB for active developer override. Fail-open on errors."""
     try:
         response = dynamodb.get_item(
             TableName=OVERRIDE_TABLE,
@@ -46,18 +88,15 @@ def has_active_override(instance_id):
         )
         if 'Item' not in response:
             return False
-
-        # TTL cleanup is async — verify expires_at manually
         expires_at = int(response['Item']['expires_at']['N'])
         if expires_at < int(time.time()):
             return False
-
         requested_by = response['Item'].get('requested_by', {}).get('S', 'unknown')
         logger.info(f"  Override active for {instance_id} (by {requested_by})")
         return True
     except Exception as e:
         logger.warning(f"Override check failed for {instance_id}: {e}")
-        return False  # fail-open: never block scheduler on DynamoDB errors
+        return False
 
 
 def execute_action(action, instance_ids):
@@ -78,6 +117,7 @@ def lambda_handler(event, context):
 
     if not candidates:
         logger.info(f"No candidates found for '{action}'")
+        send_slack_notification(action, 0, 0, [], [])
         return {'action': action, 'affected': 0, 'skipped': 0}
 
     affected, skipped = [], []
@@ -89,14 +129,11 @@ def lambda_handler(event, context):
             logger.info(f"  {action.upper()}: {inst['id']} ({inst['name']})")
             affected.append(inst['id'])
 
-    if DRY_RUN:
-        return {'action': action, 'dry_run': True, 'candidates': len(candidates), 'skipped': len(skipped)}
-
-    if affected:
+    if not DRY_RUN and affected:
         execute_action(action, affected)
         logger.info(f"Action '{action}' completed: {len(affected)} affected, {len(skipped)} skipped")
-    else:
-        logger.info(f"All {len(candidates)} candidates skipped due to overrides")
+
+    send_slack_notification(action, len(affected), len(skipped), affected, skipped)
 
     return {
         'action': action,
@@ -105,10 +142,3 @@ def lambda_handler(event, context):
         'instances_affected': affected,
         'instances_skipped': skipped
     }
-
-
-if __name__ == '__main__':
-    h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(h)
-    print(lambda_handler({'action': 'stop'}, None))
