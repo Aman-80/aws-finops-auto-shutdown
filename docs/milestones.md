@@ -7,4 +7,4 @@
 - [x] **M5: DynamoDB + override** — Slack /keepup developer escape hatch
 - [x] **M6: Slack notifications** — Daily cost summary alerts
 - [x] **M7: Grafana dashboard** — Cost savings tracker live
-- [ ] **M8: CI/CD + final polish** — GitHub Actions, tests, polished README
+- [x] **M8: CI/CD + final polish** — GitHub Actions, tests, polished README
